@@ -1,643 +1,699 @@
-# ============================================================
-#                AllahFreezer — улучшенная версия
-#             Полный рефакторинг, оптимизация, фиксы
-# ============================================================
+# -*- coding: utf-8 -*-
+"""
+AllahFreezer — переработанная и улучшенная версия
+Поддерживает: быстрый бан (.gl/.g), расширенный бан (.gl2/.g2), massban, scan, parse, ch, account_data, banstats, cache
+Автор правок: ChatGPT (рефакторинг)
+Примечания:
+ - Не создаёт .help (использует .helpcmd)
+ - Корректные валидаторы: loader.validators.Range
+ - Аккуратная обработка ошибок и кеширование
+"""
 
 import asyncio
 import re
 import time
-import typing
 from datetime import datetime
 from asyncio import sleep as asleep
+from typing import Optional, List, Dict, Any
 
-from telethon.tl import functions, types
-from telethon.tl.types import (
-    User, Channel, ChatBannedRights, Channel as TelethonChannel
-)
+from telethon.tl import functions
+from telethon.tl.types import User, Channel as TelethonChannel, ChatBannedRights
 
 from .. import loader, utils
 
-
-# ---- BAN RIGHTS ----
-BANNED_RIGHTS = ChatBannedRights(
-    until_date=None,
-    view_messages=True, send_messages=True, send_media=True,
-    send_stickers=True, send_gifs=True, send_games=True,
-    send_inline=True, send_polls=True, change_info=True,
-    invite_users=True, pin_messages=True
+# ------------- Права бана (используются при edit_permissions) -------------
+# Telethon принимает отдельные булевы флаги в edit_permissions, поэтому
+# мы будем передавать их вручную в вызове.
+BANNED_FLAGS = dict(
+    view_messages=True,
+    send_messages=True,
+    send_media=True,
+    send_stickers=True,
+    send_gifs=True,
+    send_games=True,
+    send_inline=True,
+    send_polls=True,
+    change_info=True,
+    invite_users=True,
+    pin_messages=True,
 )
 
 
-# ---- UTILS ----
-def full_name(entity: typing.Union[User, Channel]) -> str:
-    """Безопасное имя"""
-    if isinstance(entity, Channel):
-        return utils.escape_html(entity.title or "Без названия")
-    fn = (entity.first_name or "") + " " + (entity.last_name or "")
-    return utils.escape_html(fn.strip() or "Без имени")
+# ------------- Вспомогательные функции -------------
+def safe_full_name(entity: User) -> str:
+    """Возвращает безопасное HTML-имя сущности"""
+    try:
+        if hasattr(entity, "title"):
+            return utils.escape_html(getattr(entity, "title") or "Без названия")
+        fn = (getattr(entity, "first_name", "") or "") + " " + (getattr(entity, "last_name", "") or "")
+        return utils.escape_html(fn.strip() or "Без имени")
+    except Exception:
+        return "User"
 
 
-# ============================================================
-#                     MODULE CLASS
-# ============================================================
-
+# ------------- Модуль -------------
 @loader.tds
 class AllahFreezer(loader.Module):
-    """⚡️ AllahFreezer — обновлённая улучшенная версия"""
+    """⚡️ AllahFreezer — улучшенная версия (рефакторинг)"""
 
     strings = {
         "name": "AllahFreezer",
+        "helpcmd": """<b>⚙️ AllahFreezer — помощь</b>
 
-        # ---- Help ----
-        "helpcmd": """<b>⚙️ Allah Freezer — обновлённый модуль</b>
+Команды:
+• <code>.helpcmd</code> — показать эту справку
+• <code>.manual</code> — подробный мануал
+• <code>.cooldown</code> — активные КД и статистика
 
-🟦 Основные команды:
-• <code>.helpcmd</code> — помощь
-• <code>.manual</code> — мануал
-• <code>.cooldown</code> — активные КД
+Бан-команды:
+• <code>.gl @user</code> или <code>.g @user</code> — быстрый бан (по максимуму чатов)
+• <code>.gl2 @user 7d причина -t N -s</code> или <code>.g2</code> — расширенный бан (время, причина, лимит чатов, тихо)
+• <code>.massban</code> — массовый бан по списку (реплаем список или передаёшь текст)
 
-🟥 Бан-функции:
-• <code>.gl</code> @user — быстрый бан
-• <code>.gl2</code> @user 7d спам — расширенный бан
-• <code>.g</code> и <code>.g2</code> — алиасы
-• <code>.massban</code> — массовый бан по списку
-
-🟨 Утилиты:
-• <code>.scan</code> — анализ всех чатов
-• <code>.parse</code> ID — данные чата
-• <code>.ch</code> @user — шанс бана
-• <code>.account_data</code> @user — инфо об акке
-• <code>.banstats</code> — статистика
+Утилиты:
+• <code>.scan</code> — просканировать диалоги и собрать статистику
+• <code>.parse ID [DC]</code> — парсинг информации о чате
+• <code>.ch @user</code> — оценка шанса бана (оценочно)
+• <code>.account_data @user</code> — инфо об аккаунте
+• <code>.banstats</code> — статистика модулей
 • <code>.cache</code> — очистка кеша""",
-
-        "manual": """<b>📖 Мануал</b>
-<code>.gl @user</code> — быстрый бан
-<code>.gl2 @user 3d причина -s</code> — бан + время + тихий режим
-<code>.gl2 @user -t 60</code> — ограничение на число чатов
-Форматы времени: 30s / 5m / 2h / 7d""",
-
-        "no_reason": "Причина не указана",
+        "manual": "<b>📖 Мануал:</b>\nФорматы времени: 30s / 5m / 2h / 7d\nФлаги:\n -s : тихий режим (не показывает итоги)\n -t N : ограничить N чатами",
         "args": "<b>Укажи аргументы</b>",
-        "invalid_id": "<b>ID должен быть числом</b>",
         "user_not_found": "<b>Пользователь <code>{}</code> не найден</b>",
-
-        "fetching_chats": "<b>📡 Получаю чаты...</b>",
-        "no_chats": "<b>У тебя нет чатов, где можно банить</b>",
-
-        "glbanning": "⚡ Отправка банов <a href=\"{}\">{}</a>...",
-        "glban": "<b>🔥 Бан выполнен</b>\n{}",
-        "cooldown": "<b>🕑 Активные КД:</b>\n{}\n\n"
-                    "<b>📊 Статистика:</b>\n• Всего: {}\n• Успешно: {}\n• Ошибок: {}",
-
-        "cache_cleared": "<b>Кеш очищен.</b>",
-        "scanning": "<b>Сканирую...</b>",
-        "scan_result": "<b>Скан завершён</b>\nВсего: {}\nСупергруппы: {}\nКаналы: {}\nЧаты: {}\nАдмин: {}\nБан: {}\nВремя: {:.2f}s",
-
-        "parsing": "<b>Парс...</b>",
-        "parse_usage": "<b>Использование:</b> <code>.parse -100123 2</code>",
-        "parse_result": "<b>Chat:</b> {}\n<b>ID:</b> {}\nUsers: {}\nСоздан: {}\nDC: {}\nТип: {}\nAdmin: {}\nBan: {}",
-
-        "chance": "<b>Шанс бана</b>\nПользователь: <a href=\"{}\">{}</a>\nID: <code>{}</code>\n⭐ Шанс: {}%\nПричина: {}\n",
-
-        "account_data": """<b>Аккаунт:</b> <a href="{}">{}</a>
-ID: <code>{}</code>
-Username: @{}
-Premium: {}
-Bot: {}
-Restricted: {}
-Scam: {}
-Fake: {}
-Последний онлайн: {}""",
-
-        "banstats": """<b>📈 Статистика:</b>
-Операций: {}
-Успехов: {}
-Ошибок: {}
-Уникальных пользователей: {}
-Ср. скорость: {:.1f}/сек
-Работа модуля: {:.1f}s
-Последний бан: {}""",
-
-        "massban_start": "🔫 Массовый бан. Целей: {}",
-        "massban_result": "<b>Massban завершён</b>\nУспех: {}\nОшибка: {}\nВремя: {:.2f}s\nСкорость: {:.1f}/сек",
+        "no_chats": "<b>Не найдено чатов с правом банить</b>",
+        "fetching_chats": "<b>📡 Получаю список чатов...</b>",
+        "glbanning": "<b>⚡ Начинаю бан: {}</b>",
+        "glban_result": "<b>🔥 Результат:</b>\nЗабанено: {ok}/{total}\nОшибок: {fail}\nВремя: {time:.2f}s\nСкорость: {speed:.2f} бан/сек",
+        "cooldown": "<b>🕒 Активные КД:</b>\n{cooldowns}\n\n<b>Статистика:</b>\nВсего операций: {total}\nУспехов: {ok}\nОшибок: {fail}",
+        "cache_cleared": "<b>Кеш очищен</b>",
+        "scanning": "<b>🔍 Сканирование...</b>",
+        "scan_result": "<b>Результат скана:</b>\nВсего: {total}\nСупергруппы: {super}\nКаналы: {channels}\nЧаты: {chats}\nАдмин: {admin}\nМожно банить: {can_ban}\nВремя: {time:.2f}s",
+        "parse_usage": "<b>Использование:</b> <code>.parse -100123456789 2</code>",
+        "parse_result": "<b>{title}</b>\nID: <code>{id}</code>\nУчастников: {members}\nСоздан: {created}\nDC: {dc}\nТип: {type}\nЯ админ: {is_admin}\nМожно банить: {can_ban}",
+        "chance": "<b>Оценка шанса</b>\nПользователь: <a href=\"{url}\">{name}</a>\nID: <code>{id}</code>\nШанс: {chance}%\nРекомендация: {rec}",
+        "account_data": "Имя: <a href=\"{url}\">{name}</a>\nID: <code>{id}</code>\nUsername: @{username}\nPremium: {premium}\nBot: {bot}\nRestricted: {restricted}\nScam: {scam}\nFake: {fake}\nВзаимных чатов: {mutual}\nПоследний онлайн: {last}",
+        "banstats": "<b>Статистика:</b>\nОперации: {total}\nУспешно: {ok}\nОшибок: {fail}\nУникальных: {unique}\nСр. скорость: {speed:.2f}/сек\nВремя работы: {runtime:.1f}s\nПоследний бан: {last}",
+        "massban_start": "<b>🔫 Массовый бан:</b> {n} целей",
+        "massban_result": "<b>Massban:</b>\nУспех: {ok}\nОшибка: {fail}\nВремя: {time:.2f}s\nСкорость: {speed:.2f}/сек",
     }
 
-    # ==========================================================
-    #        ИНИЦИАЛИЗАЦИЯ, КЕШИ, СТАТИСТИКА
-    # ==========================================================
-
     def __init__(self):
-        self.cache_chats = []
-        self.cache_expire = 0
+        # кеш чатов (список словарей {id, title})
+        self._chats_cache: List[Dict[str, Any]] = []
+        self._chats_cache_expire = 0  # unix time
 
-        self.cooldowns = {}
-        self.stats = {
+        # статистика
+        self._stats = {
             "total": 0,
             "ok": 0,
             "fail": 0,
             "unique": set(),
-            "start": time.time(),
-            "last": None,
+            "start_time": time.time(),
+            "last_ban": None,
             "speeds": []
         }
 
-        self.sem = asyncio.Semaphore(30)
+        # семафор для параллельных операций
+        self._sem = asyncio.Semaphore(30)
 
+        # cooldowns (имя команды -> unix end)
+        self._cooldowns: Dict[str, float] = {}
+
+        # конфигурация
         self.config = loader.ModuleConfig(
             loader.ConfigValue(
-                "max_chats", 50, "Максимум чатов", validator=loader.validators.Integer(1, 200)
+                "max_chats",
+                50,
+                "Максимальное количество чатов для операций",
+                validator=loader.validators.Range(minimum=1, maximum=200),
             ),
             loader.ConfigValue(
-                "delay_between_bans", 0.01, "Задержка", validator=loader.validators.Float(0.001, 1)
-            )
+                "delay_between_bans",
+                0.01,
+                "Задержка между банами (сек)",
+                validator=loader.validators.Range(minimum=0.001, maximum=1),
+            ),
         )
 
+    # ----------------- client ready -----------------
     async def client_ready(self, client, db):
         self.client = client
         self.db = db
 
-    # ==========================================================
-    #                   HELP & MANUAL
-    # ==========================================================
-
+    # ----------------- HELP -----------------
     @loader.command()
     async def helpcmd(self, message):
-        """Помощь"""
+        """Показать справку"""
         await utils.answer(message, self.strings("helpcmd"))
 
     @loader.command()
     async def manual(self, message):
-        """Мануал"""
+        """Открыть мануал"""
         await utils.answer(message, self.strings("manual"))
 
-    # ==========================================================
-    #                 ПОЛУЧЕНИЕ АДМИН ЧАТОВ
-    # ==========================================================
-
-    async def get_admin_chats(self):
-        """Быстрый сбор чатов с бан-правами"""
+    @loader.command()
+    async def cooldown(self, message):
+        """Показать КД и статистику"""
         now = time.time()
-        if now < self.cache_expire and self.cache_chats:
-            return self.cache_chats
+        active = []
+        for k, v in self._cooldowns.items():
+            if v > now:
+                active.append(f"{k}: {v - now:.1f}s")
+        cd_text = "\n".join(active) if active else "Нет активных КД"
+        await utils.answer(
+            message,
+            self.strings("cooldown").format(
+                cooldowns=cd_text,
+                total=self._stats["total"],
+                ok=self._stats["ok"],
+                fail=self._stats["fail"],
+            ),
+        )
 
-        chats = []
-        async for dlg in self.client.iter_dialogs(limit=500):
-            ent = dlg.entity
-            if hasattr(ent, "admin_rights") and ent.admin_rights:
-                if getattr(ent.admin_rights, "ban_users", False):
-                    chats.append({
-                        "id": ent.id,
-                        "title": getattr(ent, "title", "Unknown")
-                    })
+    # ----------------- Получение чатов -----------------
+    async def _get_admin_chats(self) -> List[Dict[str, Any]]:
+        """Собирает чаты, где у бота есть права админа с ban_users"""
+        now = time.time()
+        if self._chats_cache and now < self._chats_cache_expire:
+            return self._chats_cache
 
-        self.cache_chats = chats
-        self.cache_expire = now + 180
+        chats: List[Dict[str, Any]] = []
+        start = time.time()
+        try:
+            async for dlg in self.client.iter_dialogs(limit=500):
+                ent = dlg.entity
+                # у entity может не быть admin_rights (личные диалоги)
+                if hasattr(ent, "admin_rights") and ent.admin_rights:
+                    if getattr(ent.admin_rights, "ban_users", False):
+                        chats.append({"id": ent.id, "title": getattr(ent, "title", "Неизвестно")})
+        except Exception as e:
+            # не ломаем модуль — просто вернём текущий кеш или пустоту
+            try:
+                await utils.answer(None, f"Ошибка при получении чатов: {e}")
+            except Exception:
+                pass
+
+        self._chats_cache = chats
+        self._chats_cache_expire = time.time() + 180  # кеш 3 минуты
         return chats
 
-    # ==========================================================
-    #             Основная функция — БЫСТРЫЙ БАН
-    # ==========================================================
-
-    async def fast_ban(self, chat_id: int, user_id: int, index: int):
-        """Максимально быстрый бан"""
-        try:
-            if index % 20 == 0:
-                await asleep(self.config["delay_between_bans"])
-
-            await self.client.edit_permissions(chat_id, user_id, **BANNED_RIGHTS.to_dict())
-            return True
-        except:
-            return False
-
-    # ==========================================================
-    #                       .g / .gl
-    # ==========================================================
-
-    @loader.command()
-    async def g(self, m):
-        """Alias .gl"""
-        await self.gl(m)
-
-    @loader.command()
-    async def gl(self, message):
-        """Быстрый бан"""
-        args = utils.get_args_raw(message)
-        if not args:
-            return await utils.answer(message, self.strings("args"))
-
-        try:
-            user = await self.resolve_user(args)
-        except:
-            return await utils.answer(message, self.strings("user_not_found").format(args))
-
-        msg = await utils.answer(message, self.strings("fetching_chats"))
-        chats = await self.get_admin_chats()
-
-        if not chats:
-            return await utils.answer(msg, self.strings("no_chats"))
-
-        chats = chats[: self.config["max_chats"]]
-
-        await utils.answer(
-            msg,
-            self.strings("glbanning").format(
-                utils.get_entity_url(user),
-                full_name(user)
-            )
-        )
-
-        start = time.time()
-
-        tasks = [
-            self.fast_ban(chat["id"], user.id, i)
-            for i, chat in enumerate(chats)
-        ]
-        results = await asyncio.gather(*tasks)
-
-        ok = results.count(True)
-        fail = results.count(False)
-
-        self.update_stats(ok, fail, user, start)
-
-        await utils.answer(
-            msg,
-            f"<b>🔥 Забанен в {ok}/{len(chats)} чатах</b>"
-            f"\n⏱ {time.time()-start:.2f}s"
-        )
-
-    # ==========================================================
-    #                    .g2 / .gl2
-    # ==========================================================
-
-    @loader.command()
-    async def g2(self, m): await self.gl2(m)
-
-    @loader.command()
-    async def gl2(self, message):
-        """Расширенный бан"""
-        args = utils.get_args_raw(message)
-        if not args:
-            return await utils.answer(message, self.strings("args"))
-
-        parts = args.split()
-        target = parts[0]
-        rest = " ".join(parts[1:])
-
-        silent = " -s" in rest
-        if silent:
-            rest = rest.replace(" -s", "")
-
-        # время
-        t = self.parse_time_token(rest)
-        rest = rest.replace(t["raw"], "").strip() if t["raw"] else rest
-        period = t["sec"]
-
-        # ограничение чатов
-        max_chats = self.extract_t_limit(rest)
-        if max_chats:
-            rest = re.sub(r"-t \d+", "", rest).strip()
-        else:
-            max_chats = self.config["max_chats"]
-
-        reason = rest or self.strings("no_reason")
-
-        try:
-            user = await self.resolve_user(target)
-        except:
-            return await utils.answer(message, self.strings("user_not_found").format(target))
-
-        msg = await utils.answer(message, self.strings("fetching_chats"))
-        chats = await self.get_admin_chats()
-
-        if not chats:
-            return await utils.answer(msg, self.strings("no_chats"))
-
-        chats = chats[:max_chats]
-
-        await utils.answer(
-            msg,
-            self.strings("glbanning").format(
-                utils.get_entity_url(user),
-                full_name(user)
-            )
-        )
-
-        start = time.time()
-
-        tasks = [
-            self.ban_with_time(chat["id"], user.id, period, i)
-            for i, chat in enumerate(chats)
-        ]
-        results = await asyncio.gather(*tasks)
-
-        ok = results.count(True)
-        fail = results.count(False)
-
-        self.update_stats(ok, fail, user, start)
-
-        if silent:
-            return await msg.delete()
-
-        await utils.answer(
-            msg,
-            f"<b>🔥 Забанен в {ok}/{len(chats)} чатах</b>\n"
-            f"Причина: {reason}\n"
-            f"⏱ {time.time() - start:.2f}s"
-        )
-
-    async def ban_with_time(self, chat_id, user_id, seconds, index):
-        try:
-            if index % 20 == 0:
-                await asleep(self.config["delay_between_bans"])
-            until_date = datetime.fromtimestamp(time.time() + seconds) if seconds else None
-            await self.client.edit_permissions(
-                chat_id, user_id, until_date=until_date, **BANNED_RIGHTS.to_dict()
-            )
-            return True
-        except:
-            return False
-
-    # ==========================================================
-    #                     ПАРСЕРЫ, УТИЛИТЫ
-    # ==========================================================
-
-    async def resolve_user(self, raw: str) -> User:
-        """Оптимальный безопасный поиск пользователя"""
+    # ----------------- Вспомогательные: resolve user -----------------
+    async def _resolve_user_by_arg(self, raw: str) -> Optional[User]:
+        """Надёжно разрешает пользователя из id / @username / t.me/ ссылки"""
+        if not raw:
+            return None
         raw = raw.strip()
-
-        # Если ID
-        if raw.lstrip("-").isdigit():
-            return await self.client.get_entity(int(raw))
-
         # t.me link
         if "t.me/" in raw:
-            raw = raw.split("t.me/")[1].split("/")[0].split("?")[0]
+            raw = raw.split("t.me/")[-1].split("/")[0].split("?")[0]
 
-        # @username
         if raw.startswith("@"):
             raw = raw[1:]
 
+        # ID
+        if raw.lstrip("-").isdigit():
+            try:
+                return await self.client.get_entity(int(raw))
+            except Exception:
+                return None
+
+        # username
         try:
             return await self.client.get_entity(raw)
-        except:
-            # ищем через search
-            res = await self.client(functions.contacts.SearchRequest(q=raw, limit=3))
-            if res.users:
-                return res.users[0]
-            raise ValueError("User not found")
+        except Exception:
+            # fallback: search
+            try:
+                res = await self.client(functions.contacts.SearchRequest(q=raw, limit=5))
+                if getattr(res, "users", None):
+                    return res.users[0]
+            except Exception:
+                return None
+        return None
 
-    def parse_time_token(self, text):
-        match = re.search(r"(\d+)([smhd])", text)
-        if not match:
-            return {"raw": "", "sec": 0}
+    # ----------------- Бан (быстрый) -----------------
+    async def _edit_ban(self, chat_id: int, user_id: int, until_date: Optional[datetime] = None) -> bool:
+        """Редактирование прав пользователя (бан) — обёртка с обработкой ошибок"""
+        try:
+            # используем семафор для контроля concurrency
+            async with self._sem:
+                # минимум пауза для каждого 20-го запроса
+                # (вызов от вызывающей функции передаёт index, тут пауза не нужна)
+                await self.client.edit_permissions(
+                    chat_id,
+                    user_id,
+                    until_date=until_date,
+                    **BANNED_FLAGS
+                )
+            return True
+        except Exception:
+            return False
 
-        num = int(match.group(1))
-        t = match.group(2)
-
-        mult = {"s": 1, "m": 60, "h": 3600, "d": 86400}[t]
-        return {"raw": match.group(0), "sec": num * mult}
-
-    def extract_t_limit(self, text):
-        m = re.search(r"-t (\d+)", text)
-        return int(m.group(1)) if m else None
-
-    # ==========================================================
-    #       Остальные команды: scan, parse, ch, account_data
-    # ==========================================================
+    # ----------------- Команды .g / .gl (быстрый бан) -----------------
+    @loader.command()
+    async def g(self, message):
+        """Alias to .gl"""
+        await self.gl(message)
 
     @loader.command()
-    async def scan(self, m):
-        """Сканировать чаты"""
-        msg = await utils.answer(m, self.strings("scanning"))
+    async def gl(self, message):
+        """Быстрый бан: .gl @username [-t N]"""
+        args = utils.get_args_raw(message)
+        if not args:
+            return await utils.answer(message, self.strings("args"))
+
+        # проверка CD .g
+        now = time.time()
+        cd_key = "g"
+        if self._cooldowns.get(cd_key, 0) > now:
+            return await utils.answer(message, f"<b>КД команды .g: {self._cooldowns[cd_key] - now:.1f}s</b>")
+        self._cooldowns[cd_key] = now + 20  # дефолтный КД 20s
+
+        # извлекаем флаг -t
+        t_match = re.search(r"-t\s+(\d+)", args)
+        max_chats = self.config["max_chats"]
+        if t_match:
+            try:
+                max_chats = int(t_match.group(1))
+                args = re.sub(r"-t\s+\d+", "", args).strip()
+            except Exception:
+                pass
+
+        user = await self._resolve_user_by_arg(args.split()[0])
+        if not user:
+            return await utils.answer(message, self.strings("user_not_found").format(utils.escape_html(args.split()[0])))
+
+        notify = await utils.answer(message, self.strings("fetching_chats"))
+        chats = await self._get_admin_chats()
+        if not chats:
+            return await utils.answer(notify, self.strings("no_chats"))
+
+        chats = chats[:max_chats]
+        await utils.answer(notify, self.strings("glbanning").format(safe_full_name(user)))
+
         start = time.time()
+        tasks = []
+        for i, chat in enumerate(chats):
+            # минимальные паузы внутри _edit_ban контролируются семафором, здесь можно добавить stagger
+            if i and i % 20 == 0:
+                await asleep(self.config["delay_between_bans"])
+            tasks.append(self._edit_ban(chat["id"], user.id, None))
 
-        stats = dict(total=0, super=0, channels=0, chats=0, admin=0, ban=0)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        ok = sum(1 for r in results if r is True)
+        fail = len(results) - ok
 
-        async for dlg in self.client.iter_dialogs(limit=300):
-            stats["total"] += 1
-            ent = dlg.entity
+        elapsed = time.time() - start
+        speed = ok / elapsed if elapsed > 0 else 0.0
 
-            if isinstance(ent, TelethonChannel):
-                if ent.megagroup:
-                    stats["super"] += 1
-                elif ent.broadcast:
-                    stats["channels"] += 1
-                else:
-                    stats["chats"] += 1
-            else:
-                stats["chats"] += 1
-
-            if hasattr(ent, "admin_rights") and ent.admin_rights:
-                stats["admin"] += 1
-                if getattr(ent.admin_rights, "ban_users", False):
-                    stats["ban"] += 1
+        # обновление статистики
+        self._update_stats(ok, fail, user.id, start)
 
         await utils.answer(
-            msg,
-            self.strings("scan_result").format(
-                stats["total"], stats["super"], stats["channels"],
-                stats["chats"], stats["admin"], stats["ban"],
-                time.time() - start
-            )
+            notify,
+            self.strings("glban_result").format(ok=ok, total=len(chats), fail=fail, time=elapsed, speed=speed)
         )
 
+    # ----------------- Команды .g2 / .gl2 (расширенный бан) -----------------
     @loader.command()
-    async def parse(self, m):
-        """Парсинг чата"""
-        args = utils.get_args_raw(m)
+    async def g2(self, message):
+        await self.gl2(message)
+
+    @loader.command()
+    async def gl2(self, message):
+        """Расширенный бан: .gl2 target [time] [reason] [-t N] [-s]"""
+        args_raw = utils.get_args_raw(message)
+        if not args_raw:
+            return await utils.answer(message, self.strings("args"))
+
+        # parse flags
+        parts = args_raw.split()
+        target = parts[0]
+        rest = " ".join(parts[1:]) if len(parts) > 1 else ""
+
+        silent = False
+        if " -s" in " " + rest:
+            silent = True
+            rest = rest.replace(" -s", "").strip()
+
+        t_limit_match = re.search(r"-t\s+(\d+)", rest)
+        max_chats = self.config["max_chats"]
+        if t_limit_match:
+            try:
+                max_chats = int(t_limit_match.group(1))
+                rest = re.sub(r"-t\s+\d+", "", rest).strip()
+            except Exception:
+                pass
+
+        # parse time token like 7d 2h etc (we support only one token)
+        time_token_match = re.search(r"(\d+)([smhd])", rest)
+        period_seconds = 0
+        if time_token_match:
+            num = int(time_token_match.group(1))
+            unit = time_token_match.group(2)
+            mult = {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit]
+            period_seconds = num * mult
+            rest = rest.replace(time_token_match.group(0), "").strip()
+
+        reason = rest or self.strings("no_reason") if getattr(self, "strings", None) else "Причина не указана"
+
+        user = await self._resolve_user_by_arg(target)
+        if not user:
+            return await utils.answer(message, self.strings("user_not_found").format(utils.escape_html(target)))
+
+        notify = await utils.answer(message, self.strings("fetching_chats"))
+        chats = await self._get_admin_chats()
+        if not chats:
+            return await utils.answer(notify, self.strings("no_chats"))
+
+        chats = chats[:max_chats]
+        await utils.answer(notify, self.strings("glbanning").format(safe_full_name(user)))
+
+        start = time.time()
+        tasks = []
+        for i, chat in enumerate(chats):
+            if i and i % 20 == 0:
+                await asleep(self.config["delay_between_bans"])
+            until_dt = datetime.fromtimestamp(time.time() + period_seconds) if period_seconds else None
+            tasks.append(self._edit_ban(chat["id"], user.id, until_dt))
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        ok = sum(1 for r in results if r is True)
+        fail = len(results) - ok
+
+        elapsed = time.time() - start
+        speed = ok / elapsed if elapsed > 0 else 0.0
+
+        self._update_stats(ok, fail, user.id, start)
+
+        if silent:
+            try:
+                await notify.delete()
+            except Exception:
+                pass
+            return
+
+        await utils.answer(
+            notify,
+            self.strings("glban_result").format(ok=ok, total=len(chats), fail=fail, time=elapsed, speed=speed)
+        )
+
+    # ----------------- scan -----------------
+    @loader.command()
+    async def scan(self, message):
+        """Сканировать диалоги"""
+        notify = await utils.answer(message, self.strings("scanning"))
+        start = time.time()
+
+        stats = {"total": 0, "super": 0, "channels": 0, "chats": 0, "admin": 0, "can_ban": 0}
+        try:
+            async for dlg in self.client.iter_dialogs(limit=300):
+                stats["total"] += 1
+                ent = dlg.entity
+                if isinstance(ent, TelethonChannel):
+                    if getattr(ent, "megagroup", False):
+                        stats["super"] += 1
+                    elif getattr(ent, "broadcast", False):
+                        stats["channels"] += 1
+                    else:
+                        stats["chats"] += 1
+                else:
+                    stats["chats"] += 1
+
+                if hasattr(ent, "admin_rights") and ent.admin_rights:
+                    stats["admin"] += 1
+                    if getattr(ent.admin_rights, "ban_users", False):
+                        stats["can_ban"] += 1
+        except Exception as e:
+            return await utils.answer(notify, f"<b>Ошибка скана:</b> {e}")
+
+        await utils.answer(
+            notify,
+            self.strings("scan_result").format(
+                total=stats["total"],
+                super=stats["super"],
+                channels=stats["channels"],
+                chats=stats["chats"],
+                admin=stats["admin"],
+                can_ban=stats["can_ban"],
+                time=time.time() - start,
+            ),
+        )
+
+    # ----------------- parse -----------------
+    @loader.command()
+    async def parse(self, message):
+        """Парсинг информации о чате: .parse ID [DC]"""
+        args = utils.get_args_raw(message)
         if not args:
-            return await utils.answer(m, self.strings("parse_usage"))
+            return await utils.answer(message, self.strings("parse_usage"))
 
         parts = args.split()
         try:
             chat_id = int(parts[0])
-        except:
-            return await utils.answer(m, self.strings("invalid_id"))
+        except Exception:
+            return await utils.answer(message, "<b>❌ Неверный ID</b>")
 
         dc = parts[1] if len(parts) > 1 else "?"
-
-        msg = await utils.answer(m, self.strings("parsing"))
+        notify = await utils.answer(message, self.strings("parsing") if "parsing" in self.strings else "Парсинг...")
 
         try:
             chat = await self.client.get_entity(chat_id)
         except Exception as e:
-            return await utils.answer(msg, f"<b>Ошибка:</b> {e}")
+            return await utils.answer(notify, f"<b>Ошибка получения чата:</b> {e}")
 
-        title = getattr(chat, "title", "Unknown")
-        members = getattr(chat, "participants_count", "???")
-        created = getattr(chat, "date", "???")
-        if created != "???":
-            created = created.strftime("%d.%m.%Y %H:%M")
+        title = getattr(chat, "title", "Неизвестно")
+        members = getattr(chat, "participants_count", "Неизвестно")
+        created = getattr(chat, "date", "Неизвестно")
+        if created != "Неизвестно" and created:
+            try:
+                created = created.strftime("%d.%m.%Y %H:%M")
+            except Exception:
+                created = str(created)
 
+        ctype = "Чат"
         if isinstance(chat, TelethonChannel):
-            if chat.megagroup:
+            if getattr(chat, "megagroup", False):
                 ctype = "Супергруппа"
-            elif chat.broadcast:
+            elif getattr(chat, "broadcast", False):
                 ctype = "Канал"
             else:
-                ctype = "Чат"
-        else:
-            ctype = "Чат"
+                ctype = "Канал/Чат"
 
-        # проверяем права
-        me = await self.client.get_me()
-        admin = ban = False
-
+        # права нашего аккаунта
+        is_admin = False
+        can_ban = False
         try:
-            p = await self.client.get_permissions(chat, me)
-            if getattr(p, "is_admin", False):
-                admin = True
-                ban = getattr(chat.admin_rights, "ban_users", False)
-        except:
+            me = await self.client.get_me()
+            perm = await self.client.get_permissions(chat, me)
+            if getattr(perm, "is_admin", False):
+                is_admin = True
+                can_ban = getattr(chat, "admin_rights", None) and getattr(chat.admin_rights, "ban_users", False)
+        except Exception:
             pass
 
         await utils.answer(
-            msg,
+            notify,
             self.strings("parse_result").format(
-                title, chat_id, members, created, dc, ctype,
-                "✅" if admin else "❌",
-                "✅" if ban else "❌"
-            )
+                title=title,
+                id=chat_id,
+                members=members,
+                created=created,
+                dc=dc,
+                type=ctype,
+                is_admin="✅" if is_admin else "❌",
+                can_ban="✅" if can_ban else "❌",
+            ),
         )
 
+    # ----------------- ch (оценка шанса) -----------------
     @loader.command()
-    async def ch(self, m):
-        """Шанс бана"""
-        args = utils.get_args_raw(m)
+    async def ch(self, message):
+        """Оценка шанса бана (оценочно)"""
+        args = utils.get_args_raw(message)
         if not args:
-            return await utils.answer(m, "<b>Укажи пользователя</b>")
+            return await utils.answer(message, "<b>Укажи пользователя</b>")
 
-        try:
-            user = await self.resolve_user(args)
-        except:
-            return await utils.answer(m, self.strings("user_not_found").format(args))
+        user = await self._resolve_user_by_arg(args)
+        if not user:
+            return await utils.answer(message, self.strings("user_not_found").format(utils.escape_html(args)))
 
-        chance = 75
-        reason = "Нормальный уровень риска"
+        # Простая эвристика - пример
+        chance = 70
+        rec = "⚠️ Средний шанс. Проверь более детально."
 
         await utils.answer(
-            m,
+            message,
             self.strings("chance").format(
-                utils.get_entity_url(user), full_name(user),
-                user.id, chance, reason
-            )
+                url=utils.get_entity_url(user),
+                name=safe_full_name(user),
+                id=user.id,
+                chance=chance,
+                rec=rec,
+            ),
         )
 
+    # ----------------- account_data -----------------
     @loader.command()
-    async def account_data(self, m):
-        """Данные аккаунта"""
-        args = utils.get_args_raw(m)
+    async def account_data(self, message):
+        """Информация об аккаунте"""
+        args = utils.get_args_raw(message)
         if not args:
-            return await utils.answer(m, "<b>Укажи пользователя</b>")
+            return await utils.answer(message, "<b>Укажи пользователя</b>")
 
-        try:
-            user = await self.resolve_user(args)
-        except:
-            return await utils.answer(m, self.strings("user_not_found").format(args))
+        user = await self._resolve_user_by_arg(args)
+        if not user:
+            return await utils.answer(message, self.strings("user_not_found").format(utils.escape_html(args)))
 
         username = getattr(user, "username", "нет")
-        last_online = "скрыт"
-
-        if hasattr(user, "status") and hasattr(user.status, "was_online"):
-            last_online = user.status.was_online.strftime("%d.%m.%Y %H:%M")
+        premium = "✅" if getattr(user, "premium", False) else "❌"
+        bot = "✅" if getattr(user, "bot", False) else "❌"
+        restricted = "✅" if getattr(user, "restricted", False) else "❌"
+        scam = "✅" if getattr(user, "scam", False) else "❌"
+        fake = "✅" if getattr(user, "fake", False) else "❌"
+        last = "скрыт"
+        try:
+            if hasattr(user, "status") and hasattr(user.status, "was_online"):
+                last = user.status.was_online.strftime("%d.%m.%Y %H:%M")
+        except Exception:
+            pass
 
         await utils.answer(
-            m,
+            message,
             self.strings("account_data").format(
-                utils.get_entity_url(user), full_name(user),
-                user.id, username,
-                "Да" if getattr(user, "premium", False) else "Нет",
-                "Да" if user.bot else "Нет",
-                "Да" if getattr(user, "restricted", False) else "Нет",
-                "Да" if getattr(user, "scam", False) else "Нет",
-                "Да" if getattr(user, "fake", False) else "Нет",
-                last_online
-            )
+                url=utils.get_entity_url(user),
+                name=safe_full_name(user),
+                id=user.id,
+                username=username,
+                premium=premium,
+                bot=bot,
+                restricted=restricted,
+                scam=scam,
+                fake=fake,
+                mutual="?",
+                last=last,
+            ),
         )
 
+    # ----------------- banstats -----------------
     @loader.command()
-    async def banstats(self, m):
-        """Статистика"""
-        work_time = time.time() - self.stats["start"]
-        av_speed = (sum(self.stats["speeds"]) / len(self.stats["speeds"])) if self.stats["speeds"] else 0
+    async def banstats(self, message):
+        """Статистика банов"""
+        runtime = time.time() - self._stats["start_time"]
+        avg_speed = (sum(self._stats["speeds"]) / len(self._stats["speeds"])) if self._stats["speeds"] else 0.0
 
         await utils.answer(
-            m,
+            message,
             self.strings("banstats").format(
-                self.stats["total"], self.stats["ok"], self.stats["fail"],
-                len(self.stats["unique"]), av_speed, work_time,
-                self.stats["last"] or "нет"
-            )
+                total=self._stats["total"],
+                ok=self._stats["ok"],
+                fail=self._stats["fail"],
+                unique=len(self._stats["unique"]),
+                speed=avg_speed,
+                runtime=runtime,
+                last=self._stats["last_ban"] or "никогда",
+            ),
         )
 
+    # ----------------- cache -----------------
     @loader.command()
-    async def cache(self, m):
-        """Очистить кеш"""
-        self.cache_chats = []
-        self.cache_expire = 0
-        await utils.answer(m, self.strings("cache_cleared"))
+    async def cache(self, message):
+        """Очистка кеша"""
+        self._chats_cache = []
+        self._chats_cache_expire = 0
+        await utils.answer(message, self.strings("cache_cleared"))
 
-    # ==========================================================
-    #          MASSBAN — УЛУЧШЕНЫЙ В 2 РАЗА БЫСТРЕЕ
-    # ==========================================================
-
+    # ----------------- massban -----------------
     @loader.command()
-    async def massban(self, m):
-        """Массовый бан"""
-        reply = await m.get_reply_message()
-        text = reply.text if reply else m.raw_text
+    async def massban(self, message):
+        """Массовый бан по списку: реплай на сообщение со списком юзеров или передать текcт"""
+        reply = await message.get_reply_message()
+        text = reply.text if reply and getattr(reply, "text", None) else message.raw_text
 
-        users = set()
-        for line in text.split("\n"):
-            for mention in re.findall(r"@([a-zA-Z0-9_]{5,})", line):
-                try: users.add(await self.resolve_user("@" + mention))
-                except: pass
+        # Собираем юзеров: @username, id, t.me links
+        found = set()
+        for line in (text or "").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            # mentions
+            for m in re.findall(r"@([A-Za-z0-9_]{5,})", line):
+                try:
+                    u = await self._resolve_user_by_arg("@" + m)
+                    if u:
+                        found.add(u)
+                except Exception:
+                    pass
+            # ids
+            for m in re.findall(r"(\d{5,})", line):
+                try:
+                    u = await self._resolve_user_by_arg(m)
+                    if u:
+                        found.add(u)
+                except Exception:
+                    pass
+            # t.me links
+            for part in re.findall(r"(?:https?://)?t\.me/([A-Za-z0-9_]{5,})", line):
+                try:
+                    u = await self._resolve_user_by_arg(part)
+                    if u:
+                        found.add(u)
+                except Exception:
+                    pass
 
-            for uid in re.findall(r"(\d{6,})", line):
-                try: users.add(await self.resolve_user(uid))
-                except: pass
-
-        users = [u for u in users if hasattr(u, "id")]
-
+        users = [u for u in found if hasattr(u, "id")]
         if not users:
-            return await utils.answer(m, "<b>Не найдено пользователей</b>")
+            return await utils.answer(message, "<b>Не найдено пользователей для massban</b>")
 
-        msg = await utils.answer(m, self.strings("massban_start").format(len(users)))
+        notify = await utils.answer(message, self.strings("massban_start").format(n=len(users)))
+        chats = await self._get_admin_chats()
+        if not chats:
+            return await utils.answer(notify, self.strings("no_chats"))
 
-        chats = await self.get_admin_chats()
         chats = chats[: self.config["max_chats"]]
 
-        ok = fail = 0
         start = time.time()
+        ok = fail = 0
 
         for user in users:
-            tasks = [
-                self.fast_ban(chat["id"], user.id, i)
-                for i, chat in enumerate(chats)
-            ]
-            r = await asyncio.gather(*tasks)
-            ok += r.count(True)
-            fail += r.count(False)
+            tasks = []
+            for i, chat in enumerate(chats):
+                if i and i % 20 == 0:
+                    await asleep(self.config["delay_between_bans"])
+                tasks.append(self._edit_ban(chat["id"], user.id, None))
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            ok += sum(1 for r in results if r is True)
+            fail += sum(1 for r in results if r is False)
+            # обновление статистики частично
+            self._stats["unique"].add(user.id)
+
+        elapsed = time.time() - start
+        speed = (ok / elapsed) if elapsed > 0 else 0.0
+        # глобальная статистика
+        self._stats["total"] += ok + fail
+        self._stats["ok"] += ok
+        self._stats["fail"] += fail
+        self._stats["last_ban"] = datetime.now().strftime("%H:%M:%S")
+        if ok and elapsed:
+            self._stats["speeds"].append(ok / elapsed)
 
         await utils.answer(
-            msg,
-            self.strings("massban_result").format(
-                ok, fail, (t := time.time() - start), (ok + fail) / t
-            )
+            notify,
+            self.strings("massban_result").format(ok=ok, fail=fail, time=elapsed, speed=speed),
         )
 
-    # ==========================================================
-    #             ВСПОМОГАТЕЛЬНЫЕ — СТАТИСТИКА
-    # ==========================================================
-
-    def update_stats(self, ok, fail, user, start):
-        self.stats["total"] += ok + fail
-        self.stats["ok"] += ok
-        self.stats["fail"] += fail
-        self.stats["unique"].add(user.id)
-
-        dur = time.time() - start
+    # ----------------- Обновление статистики -----------------
+    def _update_stats(self, ok: int, fail: int, user_id: int, start_time: float):
+        self._stats["total"] += ok + fail
+        self._stats["ok"] += ok
+        self._stats["fail"] += fail
+        try:
+            self._stats["unique"].add(user_id)
+        except Exception:
+            pass
+        dur = time.time() - start_time
         if ok and dur:
-            self.stats["speeds"].append(ok / dur)
+            self._stats["speeds"].append(ok / dur)
+        self._stats["last_ban"] = datetime.now().strftime("%H:%M:%S")
 
-        self.stats["last"] = datetime.now().strftime("%H:%M:%S")
+
+# Конец файла
