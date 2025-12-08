@@ -65,7 +65,8 @@ class Massban(loader.Module):
     }
 
     def __init__(self):
-        self._gban_cache = []
+        self._gban_cache = {}
+        self._gmute_cache = {}
         self._whitelist = []
 
     async def watcher(self, message):
@@ -113,72 +114,44 @@ class Massban(loader.Module):
             ),
         )
 
-        # Собираем чаты без кэширования каждый раз
-        chats = []
-        async for dialog in self._client.iter_dialogs(ignore_migrated=True, limit=200):
-            entity = dialog.entity
-            
-            # Проверяем только супергруппы и каналы
-            if not (isinstance(entity, (Channel, Chat))):
-                continue
-            
-            # Проверяем участников (минимум 5 для супергрупп)
-            participants_count = getattr(entity, "participants_count", 0)
-            if participants_count <= 5:
-                continue
-            
-            # Проверяем права администратора на бан
-            admin_rights = getattr(entity, "admin_rights", None)
-            if not admin_rights or not getattr(admin_rights, "ban_users", False):
-                continue
-            
-            # Для каналов проверяем, что это супергруппа (megagroup)
-            if isinstance(entity, Channel):
-                if not getattr(entity, "megagroup", False):
-                    continue
-            
-            chats.append(entity.id)
+        if not self._gban_cache or self._gban_cache.get("exp", 0) < time.time():
+            self._gban_cache = {
+                "exp": int(time.time()) + 10 * 60,
+                "chats": [
+                    chat.entity.id
+                    async for chat in self._client.iter_dialogs()
+                    if (
+                        (isinstance(chat.entity, Chat) or isinstance(chat.entity, Channel))
+                        and getattr(chat.entity, "admin_rights", None)
+                        and getattr(getattr(chat.entity, "admin_rights", None), "ban_users", False) is True
+                        and getattr(chat.entity, "participants_count", 6) > 5
+                    )
+                ],
+            }
 
         counter = 0
-        flood_waited = False
 
-        for chat_id in chats:
-            if counter >= max_chats: 
-                break
+        for chat_id in self._gban_cache["chats"]:
+            if counter >= max_chats: break
             try:
+                await asleep(0.05)
                 await self.ban(chat_id, user, 0, self.strings("no_reason"), silent=True)
                 counter += 1
             except Exception as e:
-                error_str = str(e)
-                if "You must pass either a channel or a supergroup" in error_str:
+                if "You must pass either a channel or a supergroup" in str(e):
                     continue
-                if "A wait of" in error_str:
-                    try:
-                        wait_time = error_str.split('A wait of ')[1].split(' ')[0]
-                        flood_waited = True
-                        # Не останавливаем процесс, просто отмечаем флудвейт
-                        counter_str = f"{counter} (floodwait {wait_time} сек)"
-                    except:
-                        counter_str = f"{counter} (floodwait)"
-                    # Обновляем сообщение статуса и продолжаем
-                    await processing_msg.edit(
-                        self.strings("glbanning").format(
-                            utils.get_entity_url(user),
-                            utils.escape_html(get_full_name(user)),
-                        ) + f"\n\n<b>Флудвейт: {wait_time if 'wait_time' in locals() else 'unknown'} сек</b>"
-                    )
-                    # Продолжаем со следующего чата
-                    continue
-                # Пропускаем другие ошибки без остановки процесса
+                if "A wait of" in str(e):
+                    counter = f"{counter} (floodwait {str(e).split('A wait of ')[1].split(' ')[0]} сек)"
+                    break
+                await processing_msg.edit(f"Error in chat {chat_id}: {e}")
                 continue
 
-        result_counter = f"{counter}" + (" (floodwait)" if flood_waited else "")
         await processing_msg.edit(
             self.strings("glban").format(
                 utils.get_entity_url(user),
                 utils.escape_html(get_full_name(user)),
                 self.strings("no_reason"),
-                self.strings("in_n_chats").format(result_counter),
+                self.strings("in_n_chats").format(counter),
             ),
         )
 
@@ -232,6 +205,29 @@ class Massban(loader.Module):
             )
             return
 
+        try:
+            await self._client.get_messages(user, limit=1)
+        except Exception:
+            pass
+
+        try:
+            first_name = getattr(user, "first_name", "") or getattr(
+                user, "title", "User"
+            )
+            last_name = getattr(user, "last_name", "") or ""
+
+            await self._client(
+                functions.contacts.AddContactRequest(
+                    id=user,
+                    first_name=first_name,
+                    last_name=last_name,
+                    phone="",
+                    add_phone_privacy_exception=False,
+                )
+            )
+        except Exception:
+            pass
+
         processing_msg = await message.reply(
             self.strings("glbanning").format(
                 utils.get_entity_url(user),
@@ -239,57 +235,36 @@ class Massban(loader.Module):
             ),
         )
 
-        # Собираем чаты без кэширования
-        chats = []
-        async for dialog in self._client.iter_dialogs(ignore_migrated=True, limit=200):
-            entity = dialog.entity
-            
-            if not (isinstance(entity, (Channel, Chat))):
-                continue
-            
-            participants_count = getattr(entity, "participants_count", 0)
-            if participants_count <= 5:
-                continue
-            
-            admin_rights = getattr(entity, "admin_rights", None)
-            if not admin_rights or not getattr(admin_rights, "ban_users", False):
-                continue
-            
-            if isinstance(entity, Channel):
-                if not getattr(entity, "megagroup", False):
-                    continue
-            
-            chats.append(entity.id)
+        if not self._gban_cache or self._gban_cache.get("exp", 0) < time.time():
+            self._gban_cache = {
+                "exp": int(time.time()) + 10 * 60,
+                "chats": [
+                    chat.entity.id
+                    async for chat in self._client.iter_dialogs()
+                    if (
+                        (isinstance(chat.entity, Chat) or isinstance(chat.entity, Channel))
+                        and getattr(chat.entity, "admin_rights", None)
+                        and getattr(getattr(chat.entity, "admin_rights", None), "ban_users", False) is True
+                        and getattr(chat.entity, "participants_count", 6) > 5
+                    )
+                ],
+            }
 
         counter = 0
-        flood_waited = False
 
-        for chat_id in chats:
-            if counter >= max_chats: 
-                break
+        for chat_id in self._gban_cache["chats"]:
+            if counter >= max_chats: break
             try:
+                await asleep(0.05)
                 await self.ban(chat_id, user_id, period, reason, silent=True)
                 counter += 1
             except Exception as e:
-                error_str = str(e)
-                if "You must pass either a channel or a supergroup" in error_str:
+                if "You must pass either a channel or a supergroup" in str(e):
                     continue
-                if "A wait of" in error_str:
-                    try:
-                        wait_time = error_str.split('A wait of ')[1].split(' ')[0]
-                        flood_waited = True
-                        # Обновляем статус
-                        await processing_msg.edit(
-                            self.strings("glbanning").format(
-                                utils.get_entity_url(user),
-                                utils.escape_html(get_full_name(user)),
-                            ) + f"\n\n<b>Флудвейт: {wait_time} сек</b>"
-                        )
-                    except:
-                        pass
-                    # Продолжаем со следующего чата
-                    continue
-                # Пропускаем ошибки
+                if "A wait of" in str(e):
+                    counter = f"{counter} (floodwait {str(e).split('A wait of ')[1].split(' ')[0]} сек)"
+                    break
+                await processing_msg.edit(f"Error in chat {chat_id}: {e}")
                 continue
 
         if silent:
@@ -299,13 +274,12 @@ class Massban(loader.Module):
                 pass
             return
 
-        result_counter = f"{counter}" + (" (floodwait)" if flood_waited else "")
         await processing_msg.edit(
             self.strings("glban").format(
                 utils.get_entity_url(user),
                 utils.escape_html(get_full_name(user)),
                 reason,
-                self.strings("in_n_chats").format(result_counter),
+                self.strings("in_n_chats").format(counter),
             ),
         )
 
@@ -376,6 +350,84 @@ class Massban(loader.Module):
 
         return t
 
+    async def args_parser(
+        self,
+        message: Message,
+        include_force: bool = False,
+        include_silent: bool = False,
+        include_count: bool = False,
+    ) -> tuple:
+        args = " " + utils.get_args_raw(message)
+
+        if include_force and " -f" in args:
+            force = True
+            args = args.replace(" -f", "")
+        else:
+            force = False
+
+        if include_silent and " -s" in args:
+            silent = True
+            args = args.replace(" -s", "")
+        else:
+            silent = False
+
+        max_chats = 40
+        if include_count and " -t " in args:
+            try:
+                t_match = re.search(r' -t (\d+)', args)
+                if t_match:
+                    max_chats = int(t_match.group(1))
+                    args = args.replace(f" -t {t_match.group(1)}", "")
+            except (ValueError, AttributeError):
+                pass
+
+        args = args.strip()
+
+        reply = await message.get_reply_message()
+
+        if reply and not args:
+            return (
+                (await self._client.get_entity(reply.sender_id)),
+                0,
+                utils.escape_html(self.strings("no_reason")).strip(),
+                *((force,) if include_force else ()),
+                *((silent,) if include_silent else ()),
+                *((max_chats,) if include_count else ()),
+            )
+
+        try:
+            a = args.split()[0]
+            if str(a).isdigit():
+                a = int(a)
+            user = await self._client.get_entity(a)
+        except Exception:
+            try:
+                user = await self._client.get_entity(reply.sender_id)
+            except Exception:
+                return False
+
+        t = ([arg for arg in args.split() if self.convert_time(arg)] or ["0"])[0]
+        args = args.replace(t, "").replace("  ", " ")
+        t = self.convert_time(t)
+
+        if not reply:
+            try:
+                args = " ".join(args.split()[1:])
+            except Exception:
+                pass
+
+        if time.time() + t >= 2208978000:
+            t = 0
+
+        return (
+            user,
+            t,
+            utils.escape_html(args or self.strings("no_reason")).strip(),
+            *((force,) if include_force else ()),
+            *((silent,) if include_silent else ()),
+            *((max_chats,) if include_count else ()),
+        )
+
     async def ban(
         self,
         chat: typing.Union[Chat, int],
@@ -396,4 +448,133 @@ class Massban(loader.Module):
             user,
             until_date=(time.time() + period) if period else 0,
             **BANNED_RIGHTS,
+        )
+
+        if silent:
+            return
+
+    @loader.command(
+        ru_doc="массовая отправка осликов",
+        en_doc="массовая отправка осликов",
+    )
+    async def massban(self, message):
+        """Массовый бан пользователей в канале -1003399078369"""
+        reply = await message.get_reply_message()
+        text = message.text or message.raw_text
+        
+        users = []
+        
+        # Получаем аргументы из сообщения
+        if reply:
+            text = reply.text or reply.raw_text
+        
+        lines = text.split('\n')
+        
+        # Ищем упоминания и юзернеймы
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+                
+            # Пропускаем команду и текст перед первым юзернеймом
+            if line.startswith('.massban') or line.startswith('.ms'):
+                continue
+                
+            # Ищем упоминания
+            mentions = re.findall(r'@([a-zA-Z0-9_]{5,})', line)
+            for mention in mentions:
+                user = await self._resolve_user_by_arg(f"@{mention}")
+                if user:
+                    users.append(user)
+            
+            # Ищем ID
+            id_match = re.search(r'(\d{5,})', line)
+            if id_match:
+                user = await self._resolve_user_by_arg(id_match.group(1))
+                if user:
+                    users.append(user)
+            
+            # Ищем ссылки t.me
+            if 't.me/' in line:
+                parts = line.split('t.me/')
+                for part in parts[1:]:
+                    username = part.split('/')[0].split(' ')[0].split('?')[0]
+                    if username:
+                        user = await self._resolve_user_by_arg(f"@{username}")
+                        if user:
+                            users.append(user)
+        
+        # Убираем дубликаты
+        unique_users = []
+        seen_ids = set()
+        for user in users:
+            if user.id not in seen_ids:
+                seen_ids.add(user.id)
+                unique_users.append(user)
+        
+        if not unique_users:
+            await utils.answer(message, "<b>Не найдены пользователи для бана</b>")
+            return
+        
+        # Фиксированный ID канала
+        target_chat_id = -1003368444769
+        
+        processing_msg = await utils.answer(
+            message,
+            f"<b>Массовая отправка осликов на {len(unique_users)} пользователей</b>",
+        )
+        
+        banned_users = []
+        failed_users = []
+        
+        # Пытаемся получить информацию о канале
+        try:
+            target_chat = await self._client.get_entity(target_chat_id)
+        except Exception as e:
+            await utils.answer(processing_msg, f"<b>Ошибка доступа к каналу: {e}</b>")
+            return
+        
+        for user in unique_users:
+            try:
+                await self.ban(
+                    target_chat_id,
+                    user,
+                    0,
+                    self.strings("no_reason"),
+                    silent=True
+                )
+                
+                full_name = get_full_name(user)
+                user_url = utils.get_entity_url(user)
+                banned_users.append(f'<a href="{user_url}">{utils.escape_html(full_name)}</a>')
+                
+            except Exception as e:
+                full_name = get_full_name(user)
+                error_msg = str(e)
+                if "You must pass either a channel or a supergroup" in error_msg:
+                    error_msg = "Не группа/канал"
+                elif "A wait of" in error_msg:
+                    error_msg = f"Floodwait {error_msg.split('A wait of ')[1].split(' ')[0]} сек"
+                elif "CHAT_ADMIN_REQUIRED" in error_msg:
+                    error_msg = "Нет прав админа в целевом канале"
+                elif "USER_NOT_PARTICIPANT" in error_msg:
+                    error_msg = "Пользователя нет в канале"
+                elif "USER_ID_INVALID" in error_msg:
+                    error_msg = "Неверный ID пользователя"
+                elif "PEER_ID_INVALID" in error_msg:
+                    error_msg = "Неверный ID канала"
+                failed_users.append(f"{utils.escape_html(full_name)}: {error_msg[:50]}")
+        
+        # Формируем результат
+        result_text = f"<b>Выебаны:</b>\n\n"
+        
+        if banned_users:
+            result_text += "\n".join(banned_users) + "\n"
+        
+        if failed_users:
+            result_text += f"\n<b>Не удалось:</b>\n" + "\n".join(failed_users)
+        
+        await utils.answer(
+            processing_msg,
+            result_text
         )
