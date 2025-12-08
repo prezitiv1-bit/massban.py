@@ -63,7 +63,7 @@ class AllahFreezer(loader.Module):
 • <code>.gl USERNAME</code> — снос Telegram-аккаунта
 • <code>.gl2 USERNAME [время] [причина] [-s]</code> — уничтожим за пару секунд
 • <code>.ch USERNAME/ID</code> — оценка шанса сноса Telegram-аккаунта
-• <code>.account_data USERNAME/ID</code> — информация об аккаунта
+• <code>.account_data USERNAME/ID</code> — информация об аккаунте
 
 🔥 <b>Дополнительные команды:</b>
 • <code>.g USERNAME</code> — быстрый бан в 40 чатах
@@ -181,7 +181,7 @@ class AllahFreezer(loader.Module):
         self._gban_cache = {}
         self._gmute_cache = {}
         self._whitelist = []
-        self._semaphore = asyncio.Semaphore(30)  # Увеличиваем для максимальной скорости
+        self._semaphore = asyncio.Semaphore(30)
         self._supergroups_cache = {}
         self._channels_cache = {}
         self._stats = {
@@ -221,7 +221,7 @@ class AllahFreezer(loader.Module):
 
     async def watcher(self, message):
         """Обработчик сообщений"""
-        # Обработка .help в любом чате
+        # Обработка .helpcmd в любом чате
         if message.text and message.text.strip().lower() == ".helpcmd":
             me = await self._client.get_me()
             if message.sender_id != me.id:
@@ -307,7 +307,7 @@ class AllahFreezer(loader.Module):
             # Быстрая загрузка ВСЕХ диалогов
             dialogs = []
             async for dialog in self._client.iter_dialogs(
-                limit=500,  # Максимум для скорости
+                limit=500,
                 ignore_migrated=True
             ):
                 dialogs.append(dialog)
