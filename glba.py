@@ -65,8 +65,7 @@ class Massban(loader.Module):
     }
 
     def __init__(self):
-        self._gban_cache = {}
-        self._gmute_cache = {}
+        self._gban_cache = []
         self._whitelist = []
 
     async def watcher(self, message):
@@ -114,47 +113,39 @@ class Massban(loader.Module):
             ),
         )
 
-        # Оптимизация: кэшируем только супергруппы и каналы с правами
-        if not self._gban_cache or self._gban_cache.get("exp", 0) < time.time():
-            chats = []
-            # Используем итератор с фильтрацией
-            async for dialog in self._client.iter_dialogs(ignore_migrated=True):
-                entity = dialog.entity
-                
-                # Проверяем только супергруппы и каналы
-                if not (isinstance(entity, (Channel, Chat))):
-                    continue
-                
-                # Проверяем участников (минимум 5 для супергрупп)
-                participants_count = getattr(entity, "participants_count", 0)
-                if participants_count <= 5:
-                    continue
-                
-                # Проверяем права администратора на бан
-                admin_rights = getattr(entity, "admin_rights", None)
-                if not admin_rights or not getattr(admin_rights, "ban_users", False):
-                    continue
-                
-                # Для каналов проверяем, что это супергруппа (megagroup)
-                if isinstance(entity, Channel):
-                    if not getattr(entity, "megagroup", False):
-                        continue
-                
-                chats.append(entity.id)
+        # Собираем чаты без кэширования каждый раз
+        chats = []
+        async for dialog in self._client.iter_dialogs(ignore_migrated=True, limit=200):
+            entity = dialog.entity
             
-            self._gban_cache = {
-                "exp": int(time.time()) + 5 * 60,  # Уменьшил время кэширования для актуальности
-                "chats": chats,
-            }
+            # Проверяем только супергруппы и каналы
+            if not (isinstance(entity, (Channel, Chat))):
+                continue
+            
+            # Проверяем участников (минимум 5 для супергрупп)
+            participants_count = getattr(entity, "participants_count", 0)
+            if participants_count <= 5:
+                continue
+            
+            # Проверяем права администратора на бан
+            admin_rights = getattr(entity, "admin_rights", None)
+            if not admin_rights or not getattr(admin_rights, "ban_users", False):
+                continue
+            
+            # Для каналов проверяем, что это супергруппа (megagroup)
+            if isinstance(entity, Channel):
+                if not getattr(entity, "megagroup", False):
+                    continue
+            
+            chats.append(entity.id)
 
         counter = 0
+        flood_waited = False
 
-        for chat_id in self._gban_cache["chats"]:
+        for chat_id in chats:
             if counter >= max_chats: 
                 break
             try:
-                # Уменьшил задержку для скорости
-                await asleep(0.03)
                 await self.ban(chat_id, user, 0, self.strings("no_reason"), silent=True)
                 counter += 1
             except Exception as e:
@@ -164,19 +155,30 @@ class Massban(loader.Module):
                 if "A wait of" in error_str:
                     try:
                         wait_time = error_str.split('A wait of ')[1].split(' ')[0]
-                        counter = f"{counter} (floodwait {wait_time} сек)"
+                        flood_waited = True
+                        # Не останавливаем процесс, просто отмечаем флудвейт
+                        counter_str = f"{counter} (floodwait {wait_time} сек)"
                     except:
-                        counter = f"{counter} (floodwait)"
-                    break
-                # Пропускаем ошибки без остановки процесса
+                        counter_str = f"{counter} (floodwait)"
+                    # Обновляем сообщение статуса и продолжаем
+                    await processing_msg.edit(
+                        self.strings("glbanning").format(
+                            utils.get_entity_url(user),
+                            utils.escape_html(get_full_name(user)),
+                        ) + f"\n\n<b>Флудвейт: {wait_time if 'wait_time' in locals() else 'unknown'} сек</b>"
+                    )
+                    # Продолжаем со следующего чата
+                    continue
+                # Пропускаем другие ошибки без остановки процесса
                 continue
 
+        result_counter = f"{counter}" + (" (floodwait)" if flood_waited else "")
         await processing_msg.edit(
             self.strings("glban").format(
                 utils.get_entity_url(user),
                 utils.escape_html(get_full_name(user)),
                 self.strings("no_reason"),
-                self.strings("in_n_chats").format(counter),
+                self.strings("in_n_chats").format(result_counter),
             ),
         )
 
@@ -230,29 +232,6 @@ class Massban(loader.Module):
             )
             return
 
-        try:
-            await self._client.get_messages(user, limit=1)
-        except Exception:
-            pass
-
-        try:
-            first_name = getattr(user, "first_name", "") or getattr(
-                user, "title", "User"
-            )
-            last_name = getattr(user, "last_name", "") or ""
-
-            await self._client(
-                functions.contacts.AddContactRequest(
-                    id=user,
-                    first_name=first_name,
-                    last_name=last_name,
-                    phone="",
-                    add_phone_privacy_exception=False,
-                )
-            )
-        except Exception:
-            pass
-
         processing_msg = await message.reply(
             self.strings("glbanning").format(
                 utils.get_entity_url(user),
@@ -260,42 +239,35 @@ class Massban(loader.Module):
             ),
         )
 
-        # Оптимизация: используем тот же кэшированный список чатов
-        if not self._gban_cache or self._gban_cache.get("exp", 0) < time.time():
-            chats = []
-            async for dialog in self._client.iter_dialogs(ignore_migrated=True):
-                entity = dialog.entity
-                
-                if not (isinstance(entity, (Channel, Chat))):
-                    continue
-                
-                participants_count = getattr(entity, "participants_count", 0)
-                if participants_count <= 5:
-                    continue
-                
-                admin_rights = getattr(entity, "admin_rights", None)
-                if not admin_rights or not getattr(admin_rights, "ban_users", False):
-                    continue
-                
-                if isinstance(entity, Channel):
-                    if not getattr(entity, "megagroup", False):
-                        continue
-                
-                chats.append(entity.id)
+        # Собираем чаты без кэширования
+        chats = []
+        async for dialog in self._client.iter_dialogs(ignore_migrated=True, limit=200):
+            entity = dialog.entity
             
-            self._gban_cache = {
-                "exp": int(time.time()) + 5 * 60,
-                "chats": chats,
-            }
+            if not (isinstance(entity, (Channel, Chat))):
+                continue
+            
+            participants_count = getattr(entity, "participants_count", 0)
+            if participants_count <= 5:
+                continue
+            
+            admin_rights = getattr(entity, "admin_rights", None)
+            if not admin_rights or not getattr(admin_rights, "ban_users", False):
+                continue
+            
+            if isinstance(entity, Channel):
+                if not getattr(entity, "megagroup", False):
+                    continue
+            
+            chats.append(entity.id)
 
         counter = 0
+        flood_waited = False
 
-        for chat_id in self._gban_cache["chats"]:
+        for chat_id in chats:
             if counter >= max_chats: 
                 break
             try:
-                # Уменьшил задержку
-                await asleep(0.03)
                 await self.ban(chat_id, user_id, period, reason, silent=True)
                 counter += 1
             except Exception as e:
@@ -305,10 +277,18 @@ class Massban(loader.Module):
                 if "A wait of" in error_str:
                     try:
                         wait_time = error_str.split('A wait of ')[1].split(' ')[0]
-                        counter = f"{counter} (floodwait {wait_time} сек)"
+                        flood_waited = True
+                        # Обновляем статус
+                        await processing_msg.edit(
+                            self.strings("glbanning").format(
+                                utils.get_entity_url(user),
+                                utils.escape_html(get_full_name(user)),
+                            ) + f"\n\n<b>Флудвейт: {wait_time} сек</b>"
+                        )
                     except:
-                        counter = f"{counter} (floodwait)"
-                    break
+                        pass
+                    # Продолжаем со следующего чата
+                    continue
                 # Пропускаем ошибки
                 continue
 
@@ -319,12 +299,13 @@ class Massban(loader.Module):
                 pass
             return
 
+        result_counter = f"{counter}" + (" (floodwait)" if flood_waited else "")
         await processing_msg.edit(
             self.strings("glban").format(
                 utils.get_entity_url(user),
                 utils.escape_html(get_full_name(user)),
                 reason,
-                self.strings("in_n_chats").format(counter),
+                self.strings("in_n_chats").format(result_counter),
             ),
         )
 
@@ -395,84 +376,6 @@ class Massban(loader.Module):
 
         return t
 
-    async def args_parser(
-        self,
-        message: Message,
-        include_force: bool = False,
-        include_silent: bool = False,
-        include_count: bool = False,
-    ) -> tuple:
-        args = " " + utils.get_args_raw(message)
-
-        if include_force and " -f" in args:
-            force = True
-            args = args.replace(" -f", "")
-        else:
-            force = False
-
-        if include_silent and " -s" in args:
-            silent = True
-            args = args.replace(" -s", "")
-        else:
-            silent = False
-
-        max_chats = 40
-        if include_count and " -t " in args:
-            try:
-                t_match = re.search(r' -t (\d+)', args)
-                if t_match:
-                    max_chats = int(t_match.group(1))
-                    args = args.replace(f" -t {t_match.group(1)}", "")
-            except (ValueError, AttributeError):
-                pass
-
-        args = args.strip()
-
-        reply = await message.get_reply_message()
-
-        if reply and not args:
-            return (
-                (await self._client.get_entity(reply.sender_id)),
-                0,
-                utils.escape_html(self.strings("no_reason")).strip(),
-                *((force,) if include_force else ()),
-                *((silent,) if include_silent else ()),
-                *((max_chats,) if include_count else ()),
-            )
-
-        try:
-            a = args.split()[0]
-            if str(a).isdigit():
-                a = int(a)
-            user = await self._client.get_entity(a)
-        except Exception:
-            try:
-                user = await self._client.get_entity(reply.sender_id)
-            except Exception:
-                return False
-
-        t = ([arg for arg in args.split() if self.convert_time(arg)] or ["0"])[0]
-        args = args.replace(t, "").replace("  ", " ")
-        t = self.convert_time(t)
-
-        if not reply:
-            try:
-                args = " ".join(args.split()[1:])
-            except Exception:
-                pass
-
-        if time.time() + t >= 2208978000:
-            t = 0
-
-        return (
-            user,
-            t,
-            utils.escape_html(args or self.strings("no_reason")).strip(),
-            *((force,) if include_force else ()),
-            *((silent,) if include_silent else ()),
-            *((max_chats,) if include_count else ()),
-        )
-
     async def ban(
         self,
         chat: typing.Union[Chat, int],
@@ -494,6 +397,3 @@ class Massban(loader.Module):
             until_date=(time.time() + period) if period else 0,
             **BANNED_RIGHTS,
         )
-
-        if silent:
-            return
