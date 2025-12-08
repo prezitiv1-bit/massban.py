@@ -255,7 +255,7 @@ class AllahFreezer(loader.Module):
         ru_doc="Показать справку",
         en_doc="Show help"
     )
-    async def help(self, message):
+    async def helpcmd(self, message):
         """Показать справку по командам"""
         await utils.answer(message, self.strings("helpcmd"))
 
