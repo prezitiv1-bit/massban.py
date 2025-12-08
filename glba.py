@@ -50,7 +50,7 @@ class AllahFreezer(loader.Module):
 
     strings = {
         "name": "AllahFreezer",
-        "help": """<b>⚙️ Allah Fr33z3r</b>
+        "helpcmd": """<b>⚙️ Allah Fr33z3r</b>
 
 📌 <b>Основные команды:</b>
 • <code>.helpcmd</code> — показать список команд
@@ -222,10 +222,10 @@ class AllahFreezer(loader.Module):
     async def watcher(self, message):
         """Обработчик сообщений"""
         # Обработка .help в любом чате
-        if message.text and message.text.strip().lower() == ".help":
+        if message.text and message.text.strip().lower() == ".helpcmd":
             me = await self._client.get_me()
             if message.sender_id != me.id:
-                await utils.answer(message, self.strings("help"))
+                await utils.answer(message, self.strings("helpcmd"))
                 return
         
         # Обработка приватных команд от доверенных пользователей
@@ -257,7 +257,7 @@ class AllahFreezer(loader.Module):
     )
     async def help(self, message):
         """Показать справку по командам"""
-        await utils.answer(message, self.strings("help"))
+        await utils.answer(message, self.strings("helpcmd"))
 
     @loader.command(
         ru_doc="Открыть мануал",
